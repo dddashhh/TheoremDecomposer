@@ -1,0 +1,125 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  prepare-cache:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Lean
+      uses: leanprover/lean-action@v1
+      with:
+        version: stable
+    
+    - name: Cache lake packages
+      uses: actions/cache@v4
+      with:
+        path: .lake
+        key: ${{ runner.os }}-lake-${{ hashFiles('lakefile.lean') }}
+    
+    - name: Pre-build
+      run: lake build TheoremDecomposer.lean || true
+
+  build:
+    runs-on: ubuntu-latest
+    needs: prepare-cache
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install Lean
+      run: |
+        curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y
+        echo "$HOME/.elan/bin" >> $GITHUB_PATH
+    
+    - name: Restore cache
+      uses: actions/cache@v4
+      with:
+        path: .lake
+        key: ${{ runner.os }}-lake-${{ hashFiles('lakefile.lean') }}
+    
+    - name: Build
+      run: |
+        lake clean
+        lake build TheoremDecomposer.lean
+    
+    - name: Save build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: build
+        path: .lake/build/
+        retention-days: 1
+
+  test:
+    runs-on: ubuntu-latest
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        test-suite: [1, 2, 3] 
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install Lean
+      run: |
+        curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y
+        echo "$HOME/.elan/bin" >> $GITHUB_PATH
+    
+    - name: Download build
+      uses: actions/download-artifact@v4
+      with:
+        name: build
+        path: .lake/build/
+    
+    - name: Run tests group ${{ matrix.test-suite }}
+      run: |
+        lake env lean test_working.lean 2>&1 | tee test_output_group_${{ matrix.test-suite }}.log
+    
+    - name: Upload test results
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-output-group-${{ matrix.test-suite }}
+        path: test_output_group_${{ matrix.test-suite }}.log
+        retention-days: 30
+
+  combine-results:
+    runs-on: ubuntu-latest
+    needs: test
+    if: always()
+    steps:
+    - name: Download all test outputs
+      uses: actions/download-artifact@v4
+      with:
+        pattern: test-output-group-*
+        path: all-results/
+        merge-multiple: true
+    
+    - name: Combine results
+      run: |
+        echo "=== Combined Test Results ===" > combined.log
+        echo "" >> combined.log
+        for f in all-results/*.log; do
+          echo "=== $(basename $f) ===" >> combined.log
+          cat "$f" >> combined.log
+          echo "" >> combined.log
+        done
+        
+        # Check for errors
+        if grep -i "error" combined.log; then
+          echo "Tests failed"
+          exit 1
+        else
+          echo "All tests passed"
+        fi
+    
+    - name: Upload combined results
+      uses: actions/upload-artifact@v4
+      with:
+        name: combined-test-results
+        path: combined.log
+        retention-days: 90
